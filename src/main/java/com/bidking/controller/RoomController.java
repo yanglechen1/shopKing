@@ -91,7 +91,35 @@ public class RoomController {
     @RateLimit("getRoom")
     @GetMapping("/{roomId}")
     public ResponseEntity<?> getRoom(@PathVariable String roomId) {
-        return ResponseEntity.ok(roomManager.getRoom(roomId));
+        GameRoom room = roomManager.getRoom(roomId);
+        return ResponseEntity.ok(sanitizeRoom(room));
+    }
+
+    /** 移除仓库中每件物品的 value 字段，防止实际价值泄露给客户端 */
+    private Map<String, Object> sanitizeRoom(GameRoom room) {
+        Map<String, Object> map = new java.util.LinkedHashMap<>();
+        map.put("roomId", room.getRoomId());
+        map.put("state", room.getState());
+        map.put("currentRound", room.getCurrentRound());
+        map.put("roundDeadline", room.getRoundDeadline());
+        map.put("config", room.getConfig());
+        map.put("hostId", room.getHostId());
+        map.put("playerIds", room.getPlayerIds());
+        map.put("playerCharacters", room.getPlayerCharacters());
+        map.put("readyPlayerIds", room.getReadyPlayerIds());
+        map.put("tieBreakCount", room.getTieBreakCount());
+        if (room.getWarehouse() != null) {
+            List<Map<String, Object>> safeWarehouse = new java.util.ArrayList<>();
+            for (Map<String, Object> item : room.getWarehouse()) {
+                Map<String, Object> safeItem = new java.util.LinkedHashMap<>(item);
+                safeItem.remove("value");
+                safeWarehouse.add(safeItem);
+            }
+            map.put("warehouse", safeWarehouse);
+        } else {
+            map.put("warehouse", null);
+        }
+        return map;
     }
 
     /** 房主更新本局配置（每60秒最多5次） */
@@ -131,8 +159,8 @@ public class RoomController {
                                       Authentication auth) {
         Long playerId = (Long) auth.getPrincipal();
         GameRoom room = roomManager.getRoom(roomId);
-        if (room.getState() != GameState.SKILL_PHASE) {
-            return ResponseEntity.badRequest().body(Map.of("error", "当前不在技能阶段"));
+        if (room.getState() == GameState.WAITING || room.getState() == GameState.FINISHED) {
+            return ResponseEntity.badRequest().body(Map.of("error", "当前不可使用技能"));
         }
         String pidStr = String.valueOf(playerId);
         String character = room.getPlayerCharacters() != null
@@ -144,9 +172,9 @@ public class RoomController {
         String stateKey = "game:player:state:" + roomId + ":" + pidStr;
         Boolean set = redisTemplate.opsForHash().putIfAbsent(stateKey, "skillUsed", "true");
         if (Boolean.FALSE.equals(set)) {
-            return ResponseEntity.badRequest().body(Map.of("error", "本轮技能已使用"));
+            return ResponseEntity.badRequest().body(Map.of("error", "技能在本局游戏中已使用"));
         }
-        Map<String, Object> result = skillEngine.useSkill(character, room.getWarehouse(), room.getCurrentRound(), category);
+        Map<String, Object> result = skillEngine.useSkill(character, room.getWarehouse(), category);
         // 技能执行返回 error 时，清除 SETNX 标记，允许玩家重试
         if (result.containsKey("error")) {
             redisTemplate.opsForHash().delete(stateKey, "skillUsed");

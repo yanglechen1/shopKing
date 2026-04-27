@@ -52,19 +52,6 @@ public class TimerService {
         futures.put(roomId, future);
     }
 
-    /**
-     * 启动技能阶段倒计时
-     */
-    public void startSkillTimer(String roomId, int seconds, Runnable onExpire) {
-        cancelTimer(roomId);
-        log.info("[Timer] 房间={} 技能阶段倒计时启动，{}秒", roomId, (Object) seconds);
-        ScheduledFuture<?> future = scheduler.schedule(() -> {
-            log.info("[Timer] 房间={} 技能阶段结束", roomId);
-            onExpire.run();
-        }, seconds, TimeUnit.SECONDS);
-        futures.put(roomId, future);
-    }
-
     /** 取消房间当前定时任务 */
     public void cancelTimer(String roomId) {
         ScheduledFuture<?> old = futures.remove(roomId);

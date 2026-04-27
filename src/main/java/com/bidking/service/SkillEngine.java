@@ -32,7 +32,6 @@ public class SkillEngine {
      */
     public Map<String, Object> useSkill(String characterType,
                                         List<Map<String, Object>> warehouse,
-                                        int round,
                                         String category) {
         return switch (characterType.toUpperCase()) {
             case "LAOTOU"    -> laotouSkill(warehouse);

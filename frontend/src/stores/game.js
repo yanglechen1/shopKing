@@ -21,6 +21,9 @@ export const useGameStore = defineStore('game', () => {
   const allBids = ref(null)       // 本轮所有出价信息 {bids:{}} 或 {ranking:[]}
   const roundHistory = ref([])     // 多轮历史 [{round, bids/ranking, items}, ...]
   const itemResults = ref([])     // 道具使用结果记录 [{itemType, message, round}, ...]
+  const itemPending = ref(false)   // 道具使用中（防止并发，等待服务器响应）
+  const hasBidThisRound = ref(false) // 本轮是否已出价（断线重连恢复用）
+  const bidSubmitted = ref(false)  // 当前轮是否已提交过出价（每轮 ROUND_START 复位）
 
   let client = null
 
@@ -43,6 +46,9 @@ export const useGameStore = defineStore('game', () => {
     allBids.value = null
     roundHistory.value = []
     itemResults.value = []
+    itemPending.value = false
+    hasBidThisRound.value = false
+    bidSubmitted.value = false
 
     const auth = useAuthStore()
     client = new Client({
@@ -77,6 +83,12 @@ export const useGameStore = defineStore('game', () => {
           // 恢复背包信息（由 reconnect 后端附带）
           if (snap.items) playerItems.value = snap.items
           if (snap.coins != null) playerCoins.value = snap.coins
+          // 恢复出价状态（供 RoomView 恢复 bidSubmitted）
+          hasBidThisRound.value = snap.hasBidThisRound === true
+          // 恢复待激活增益（翻倍卡/加价券，断线前已使用但未出价）
+          if (snap.pendingBuff && snap.pendingBuff !== '') {
+            itemResults.value = [...itemResults.value, { itemType: snap.pendingBuff, message: snap.pendingBuff === 'DOUBLE_BID' ? '翻倍卡已激活，本轮出价将翻倍计算' : '加价券已激活，本轮出价将增加3000', round: snap.round }]
+          }
         })
         // 错误消息
         client.subscribe('/user/queue/error', ({ body }) => {
@@ -96,6 +108,14 @@ export const useGameStore = defineStore('game', () => {
         client.subscribe('/user/queue/item-result', ({ body }) => {
           const msg = JSON.parse(body)
           console.log('[WS] 收到道具使用结果:', msg)
+          itemPending.value = false
+          // 服务器确认成功后才从本地背包移除，否则保留（防前后端不同步）
+          if (msg.success && msg.itemType) {
+            const idx = playerItems.value.indexOf(msg.itemType)
+            if (idx !== -1) {
+              playerItems.value = [...playerItems.value.slice(0, idx), ...playerItems.value.slice(idx + 1)]
+            }
+          }
           itemResults.value = [...itemResults.value, { itemType: msg.itemType, message: msg.message, round: round.value }]
         })
         // 触发重连快照（传入 roomId，防止旧局污染新局）
@@ -110,8 +130,9 @@ export const useGameStore = defineStore('game', () => {
     client?.deactivate()
   }
 
-  /** 提交出价 */
+  /** 提交出价（同时标记本局已出价，ROUND_START 时会复位） */
   function submitBid(roomId, amount) {
+    bidSubmitted.value = true
     client.publish({
       destination: '/app/room/bid',
       body: JSON.stringify({ roomId, amount, clientTs: Date.now() })
@@ -120,10 +141,13 @@ export const useGameStore = defineStore('game', () => {
 
   /** 使用道具（独立于出价，先使用再出价） */
   function useItem(roomId, itemType) {
+    itemPending.value = true
     client.publish({
       destination: '/app/room/useItem',
       body: JSON.stringify({ roomId, itemType })
     })
+    // 安全网：10秒后无论是否收到响应都重置，防止状态卡死
+    setTimeout(() => { itemPending.value = false }, 10000)
   }
 
   /** 处理服务端广播，更新本地状态 */
@@ -135,13 +159,9 @@ export const useGameStore = defineStore('game', () => {
       deadlineTs.value = msg.payload.deadlineTs
       playerBids.value = {}
       allBids.value = null
-    } else if (msg.type === 'SKILL_PHASE_START') {
-      state.value = 'SKILL_PHASE'
-      round.value = msg.payload.round
-      playerBids.value = {}
-      allBids.value = null
+      bidSubmitted.value = false         // 每轮开始时复位，允许重新出价
     } else if (msg.type === 'BID_PLACED') {
-      playerBids.value = { ...playerBids.value, [msg.playerId]: true }
+      playerBids.value = { ...playerBids.value, [msg.payload.playerId]: true }
     } else if (msg.type === 'ALL_BIDS') {
       allBids.value = msg.payload
       // 累积多轮出价历史（左侧面板展示用）
@@ -158,15 +178,17 @@ export const useGameStore = defineStore('game', () => {
     } else if (msg.type === 'GAME_SETTLED') {
       settled.value = msg
     } else if (msg.type === 'GAME_RESTART') {
-      // 回到准备大厅
-      window.location.href = '/room/' + (window.location.pathname.match(/\/room\/([^/]+)/)?.[1] || '') + '/lobby'
+      // 回到准备大厅（仅在非大厅页面执行，避免 router.push + 广播双重导航）
+      if (!window.location.pathname.endsWith('/lobby')) {
+        window.location.href = '/room/' + (window.location.pathname.match(/\/room\/([^/]+)/)?.[1] || '') + '/lobby'
+      }
     }
   }
 
   return {
     state, round, deadlineTs, players, bidCount,
     feedback, skillResult, messages, settled,
-    playerItems, playerCoins, playerBids, allBids, roundHistory, itemResults,
+    playerItems, playerCoins, playerBids, allBids, roundHistory, itemResults, itemPending, hasBidThisRound, bidSubmitted,
     connect, disconnect, submitBid, useItem
   }
 })

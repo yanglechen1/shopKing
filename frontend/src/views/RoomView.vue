@@ -100,9 +100,16 @@
         <div class="bb-body">
           <select v-if="myCharacter === 'AISHA' && !skillUsedLocal" v-model="selectedCategory" class="bb-select">
             <option value="">品类...</option>
-            <option value="FURNITURE">家居</option>
-            <option value="DIGITAL">数码</option>
-            <option value="ANTIQUE">古董</option>
+            <option value="FURNITURE">家居家具</option>
+            <option value="DIGITAL">数码科技</option>
+            <option value="ANTIQUE">古董珍玩</option>
+            <option value="BOOK">古典书籍</option>
+            <option value="JEWELRY">珠宝宝石</option>
+            <option value="FOOD">珍稀食材</option>
+            <option value="ELECTRONICS">电子器件</option>
+            <option value="ART">艺术品</option>
+            <option value="MUSICAL">乐器</option>
+            <option value="WEAPON">兵器</option>
           </select>
           <button @click="useSkill" :disabled="skillUsedLocal || (myCharacter === 'AISHA' && !selectedCategory)" class="bb-btn">
             {{ skillUsedLocal ? '已使用' : '使用技能' }}
@@ -119,7 +126,7 @@
           <template v-if="game.playerItems && game.playerItems.length > 0">
             <button v-for="(it, i) in game.playerItems" :key="i"
                     class="bb-item-card"
-                    @click="useItem(it)" :disabled="bidSubmitted || itemUsing">
+                    @click="useItem(it)" :disabled="game.bidSubmitted || itemUsing">
               {{ getItemName(it) }}
             </button>
           </template>
@@ -135,11 +142,11 @@
         </span>
         <div class="bb-body">
           <input v-model.number="bidAmount" type="number" placeholder="金额" class="bb-input"
-                 :disabled="bidSubmitted || game.state === 'SKILL_PHASE'" />
+                 :disabled="game.bidSubmitted" />
           <button @click="submitBid" :disabled="!canBid" class="bb-btn bb-bid-btn">
-            {{ bidSubmitted ? '已出价' : '提交出价' }}
+            {{ game.bidSubmitted ? '已出价' : '提交出价' }}
           </button>
-          <span v-if="bidSubmitted" class="bb-done">已出价</span>
+          <span v-if="game.bidSubmitted" class="bb-done">已出价</span>
         </div>
       </div>
     </div>
@@ -182,6 +189,9 @@ const game = useGameStore()
 const auth = useAuthStore()
 const roomId = route.params.id
 
+// 进入页面时立即复位出价状态，防止上一局 SPA 残留；重连时由 hasBidThisRound watcher 恢复
+game.bidSubmitted = false
+
 // Player info for left panel
 const playerList = ref([])
 const playerChars = ref({})
@@ -200,10 +210,12 @@ const warehouse = ref([])
 const blindBidding = ref(true)
 
 // Bidding state (inline, replaces BiddingPanel)
+// bidSubmitted 已移至 store，ROUND_START 时自动复位
 const bidAmount = ref(0)
-const bidSubmitted = ref(false)
 const remaining = ref(0)
-const itemUsing = ref(false)      // 道具使用中（防止双击）
+
+// 道具使用状态由 store 统一管理（含服务端响应确认）
+const itemUsing = computed(() => game.itemPending)
 
 const CHAR_NAMES = {
   LAOTOU: '老头', AISHA: '艾莎', ETHAN: '伊森',
@@ -255,12 +267,12 @@ function formatBid(amount) {
 
 // 游戏进行中（显示底部操作栏）
 const isPlaying = computed(() =>
-  game.state === 'SKILL_PHASE' || game.state === 'BIDDING' || game.state === 'GRACE_PERIOD'
+  game.state === 'BIDDING' || game.state === 'GRACE_PERIOD'
 )
 
-// 可否出价
+// 可否出价（道具使用中不允许出价，防止 pendingBuff 未写入）
 const canBid = computed(() =>
-  !bidSubmitted.value && bidAmount.value > 0 &&
+  !game.bidSubmitted && !itemUsing.value && bidAmount.value > 0 &&
   (game.state === 'BIDDING' || game.state === 'GRACE_PERIOD')
 )
 
@@ -309,7 +321,7 @@ function categoryLabel(cat) {
 
 const stateLabel = computed(() => {
   const map = {
-    WAITING: '等待中', SKILL_PHASE: '技能阶段', BIDDING: '出价中',
+    WAITING: '等待中', BIDDING: '出价中', EVALUATING: '判定中',
     GRACE_PERIOD: '等待结果', TIE_BREAK: '加赛', REVEALING: '开箱中',
     SETTLING: '结算中', FINISHED: '已结束'
   }
@@ -349,11 +361,18 @@ async function fetchRoomData() {
   }
 }
 
-// 游戏状态变化时自动刷新仓库
+// 进入 BIDDING 时如果仓库为空则拉取（首次加载或断线重连）
 watch(() => game.state, (newState, oldState) => {
-  if (newState === 'SKILL_PHASE' && oldState !== 'SKILL_PHASE') {
-    fetchRoomData()
+  if (newState === 'BIDDING' && oldState !== newState) {
+    if (warehouse.value.length === 0) {
+      fetchRoomData()
+    }
   }
+})
+
+// 断线重连后恢复出价状态（store 在 reconnect 快照中更新 hasBidThisRound）
+watch(() => game.hasBidThisRound, (val) => {
+  if (val) game.bidSubmitted = true
 })
 
 onUnmounted(() => {
@@ -392,25 +411,15 @@ async function useSkill() {
 }
 
 function submitBid() {
-  if (bidSubmitted.value || bidAmount.value <= 0) return
+  if (game.bidSubmitted || bidAmount.value <= 0) return
   if (game.state !== 'BIDDING' && game.state !== 'GRACE_PERIOD') return
   game.submitBid(roomId, bidAmount.value)
-  bidSubmitted.value = true
 }
 
-/** 使用道具（独立于出价，通过 WS 发送） */
+/** 使用道具（独立于出价，通过 WS 发送，道具移除由 store 在 item-result 确认后执行） */
 function useItem(itemType) {
-  if (bidSubmitted.value || itemUsing.value) return
-  itemUsing.value = true
+  if (game.bidSubmitted || itemUsing.value) return
   game.useItem(roomId, itemType)
-  // 从本地背包移除（服务端已删除，前端同步）
-  if (game.playerItems) {
-    const idx = game.playerItems.indexOf(itemType)
-    if (idx !== -1) {
-      game.playerItems = [...game.playerItems.slice(0, idx), ...game.playerItems.slice(idx + 1)]
-    }
-  }
-  setTimeout(() => { itemUsing.value = false }, 1000)
 }
 </script>
 

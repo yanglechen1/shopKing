@@ -117,8 +117,8 @@ public class GameWsController {
         // 广播哪位玩家出价了（供左侧面板显示状态，count供前端计算已出价人数）
         long bidCount = redis.opsForHash().size(bidKey);
         messaging.convertAndSend("/topic/room/" + req.getRoomId(),
-                Map.of("type", "BID_PLACED", "playerId", playerId,
-                       "count", bidCount, "total", room.getPlayerIds().size()));
+                Map.of("type", "BID_PLACED", "payload", Map.of("playerId", playerId,
+                       "count", bidCount, "total", room.getPlayerIds().size())));
 
         // 所有人都出价则提前触发判定
         if (bidCount >= room.getPlayerIds().size()) {
@@ -162,18 +162,22 @@ public class GameWsController {
         if (room.getState() == GameState.WAITING) return;
 
         String bidKey = String.format(BIDS_KEY, currentRoomId, room.getCurrentRound());
-        boolean hasBid = redis.opsForHash().hasKey(bidKey, playerId);
 
         // 收集本轮已出价的玩家ID列表（供前端恢复左侧面板状态）
         Map<Object, Object> existingBids = redis.opsForHash().entries(bidKey);
         java.util.List<String> bidderIds = new java.util.ArrayList<>();
+        String myBidVal = null;
         for (Object key : existingBids.keySet()) {
             String val = (String) existingBids.get(key);
             // "0" 是 SETNX 占位符，实际金额还未写入（极端竞争条件）
             if (val != null && !"0".equals(val)) {
                 bidderIds.add((String) key);
             }
+            if (playerId.equals(key)) {
+                myBidVal = val;
+            }
         }
+        boolean hasBid = myBidVal != null && !"0".equals(myBidVal);
 
         log.info("[WS] 玩家={} 重连 房间={} 状态={} 已出价={} 本轮已出价人数={}", playerId, currentRoomId, room.getState(), hasBid, bidderIds.size());
         log.info("[WS] 私信 playerId={} /queue/reconnect action=RESUME state={}", playerId, room.getState());
@@ -182,6 +186,7 @@ public class GameWsController {
         String stateKey = String.format(STATE_KEY, currentRoomId, playerId);
         String coinsStr = (String) redis.opsForHash().get(stateKey, "coins");
         String itemsJson = (String) redis.opsForHash().get(stateKey, "items");
+        String pendingBuff = (String) redis.opsForHash().get(stateKey, "pendingBuff");
         long coins = coinsStr != null ? Long.parseLong(coinsStr) : 0;
         java.util.List<String> items = new java.util.ArrayList<>();
         if (itemsJson != null && !itemsJson.isBlank()) {
@@ -196,7 +201,8 @@ public class GameWsController {
                 "hasBidThisRound", hasBid,
                 "bidderIds", bidderIds,
                 "coins", coins,
-                "items", items
+                "items", items,
+                "pendingBuff", pendingBuff != null ? pendingBuff : ""
         ));
     }
 

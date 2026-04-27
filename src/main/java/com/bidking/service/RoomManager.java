@@ -71,10 +71,19 @@ public class RoomManager {
                         // 自己创建的空房间，直接删除
                         redis.delete(ROOM_KEY + oldRoomId);
                         log.info("[Room] 清理旧空房间 roomId={}", oldRoomId);
-                    } else if (!oldRoom.getHostId().equals(hostId)) {
-                        // 在别人的房间里，静默退出
+                    } else {
+                        // 在别人的房间里或自己非空旧房间，静默退出
                         oldRoom.getPlayerIds().remove(hostId);
                         oldRoom.getReadyPlayerIds().remove(hostId);
+                        oldRoom.getPlayerCharacters().remove(String.valueOf(hostId));
+                        oldRoom.getPendingPurchases().remove(String.valueOf(hostId));
+                        if (oldRoom.getHostId().equals(hostId)) {
+                            // 房主离开，将房主转给下一个玩家（如果有的话）
+                            if (!oldRoom.getPlayerIds().isEmpty()) {
+                                oldRoom.setHostId(oldRoom.getPlayerIds().get(0));
+                                log.info("[Room] 房主={} 离开旧房间={}，新房主={}", hostId, oldRoomId, oldRoom.getHostId());
+                            }
+                        }
                         saveRoom(oldRoom);
                         log.info("[Room] 玩家={} 退出旧房间={}", hostId, oldRoomId);
                     }
@@ -219,7 +228,9 @@ public class RoomManager {
             state.put("hasBidThisRound", "false");
             state.put("skillUsed", "false");
             state.put("items", objectMapper.writeValueAsString(items));
-            redis.opsForHash().putAll(String.format(STATE_KEY, room.getRoomId(), pidStr), state);
+            String stateKey = String.format(STATE_KEY, room.getRoomId(), pidStr);
+            redis.opsForHash().putAll(stateKey, state);
+            redis.expire(stateKey, ROOM_TTL_HOURS, TimeUnit.HOURS);
             log.info("[Shop] 玩家={} 初始化 金币={} 道具={}", pidStr, coins, items);
         }
         // 清空购买清单，以免影响后续
@@ -240,12 +251,23 @@ public class RoomManager {
             return result;
         }
 
-        // 从背包移除
-        removePlayerItem(roomId, pidStr, itemType);
-
         ItemType type = ItemType.valueOf(itemType);
         GameRoom room = getRoom(roomId);
         int round = room.getCurrentRound();
+
+        // 每个玩家每轮只能使用一个 buff 类道具（翻倍卡/加价券），防止覆盖浪费
+        if (type == ItemType.DOUBLE_BID || type == ItemType.EXTRA_3000) {
+            String existingBuff = (String) redis.opsForHash().get(
+                    String.format(STATE_KEY, roomId, pidStr), "pendingBuff");
+            if (existingBuff != null) {
+                result.put("success", false);
+                result.put("message", "本轮已有激活的增益道具（" + existingBuff + "），请先出价后再使用");
+                return result;
+            }
+        }
+
+        // 从背包移除（放在检查之后，防止校验失败时误删道具）
+        removePlayerItem(roomId, pidStr, itemType);
 
         switch (type) {
             case DOUBLE_BID -> {
@@ -402,7 +424,8 @@ public class RoomManager {
         initPlayerStates(room);
         log.info("[Room] 仓库已生成 roomId={} 物品数={}", roomId, room.getWarehouse().size());
         startTimes.put(roomId, LocalDateTime.now());
-        enterSkillPhase(roomId);
+        // 跳过 SKILL_PHASE，直接进入 BIDDING
+        startNewRound(roomId);
     }
 
     /**
@@ -433,10 +456,16 @@ public class RoomManager {
                 "kicked", true));
     }
 
-    /** 进入技能阶段 */
-    public void enterSkillPhase(String roomId) {
+    /** 进入下一轮（跳过 SKILL_PHASE，直接进入 BIDDING） */
+    public void startNewRound(String roomId) {
         GameRoom room = getRoom(roomId);
         room.setCurrentRound(room.getCurrentRound() + 1);
+
+        // 清理所有玩家上轮残留的 pendingBuff，防止未出价情况下的效果跨轮
+        for (Long pid : room.getPlayerIds()) {
+            String stateKey = String.format(STATE_KEY, roomId, pid);
+            redis.opsForHash().delete(stateKey, "pendingBuff");
+        }
 
         // 检查是否超过最大轮数（优先使用 totalRounds，否则用速胜轮+决战轮）
         int maxRounds = room.getConfig().getTotalRounds() != null
@@ -448,13 +477,8 @@ public class RoomManager {
             finishGame(roomId);
             return;
         }
-        setState(roomId, room, GameState.SKILL_PHASE);
-        log.info("[Room] roomId={} 第{}轮 → SKILL_PHASE", (Object) roomId, (Object) room.getCurrentRound());
 
-        broadcast(roomId, "SKILL_PHASE_START", Map.of("round", room.getCurrentRound()));
-
-        timerService.startSkillTimer(roomId, room.getConfig().getSkillPhaseSecs(),
-                () -> enterBidding(roomId));
+        enterBidding(roomId);
     }
 
     /** 进入出价阶段 */
@@ -501,111 +525,122 @@ public class RoomManager {
             setState(roomId, room, GameState.EVALUATING);
             log.info("[Room] roomId={} 第{}轮 → EVALUATING", (Object) roomId, (Object) room.getCurrentRound());
 
-            // 读取本轮出价
-            String bidKey = String.format(BIDS_KEY, roomId, room.getCurrentRound());
-            Map<Object, Object> rawBids = redis.opsForHash().entries(bidKey);
-            Map<String, Long> bids = new LinkedHashMap<>();
-            // 未出价的玩家视为弃权（-1）
-            for (Long pid : room.getPlayerIds()) {
-                String pidStr = String.valueOf(pid);
-                Object val = rawBids.get(pidStr);
-                bids.put(pidStr, val != null ? Long.parseLong((String) val) : -1L);
-            }
-
-            // 读取本轮道具使用情况
-            String itemsKey = "game:items:" + roomId + ":" + room.getCurrentRound();
-            Map<Object, Object> roundItems = redis.opsForHash().entries(itemsKey);
-            Map<String, String> items = new LinkedHashMap<>();
-            for (Map.Entry<Object, Object> e : roundItems.entrySet()) {
-                items.put((String) e.getKey(), (String) e.getValue());
-            }
-
-            // 广播所有出价信息（供左侧面板显示）
-            Map<String, Object> allBidsPayload = new LinkedHashMap<>();
-            if (Boolean.TRUE.equals(room.getConfig().getBlindBidding())) {
-                // 暗拍：按出价排序显示排名（不含弃权玩家）
-                List<String> ranking = bids.entrySet().stream()
-                        .filter(e -> e.getValue() >= 0)
-                        .sorted(Map.Entry.<String, Long>comparingByValue().reversed())
-                        .map(Map.Entry::getKey)
-                        .toList();
-                allBidsPayload.put("ranking", ranking);
-            } else {
-                // 明拍：显示实际出价
-                allBidsPayload.put("bids", bids);
-            }
-            allBidsPayload.put("items", items);
-            broadcast(roomId, "ALL_BIDS", allBidsPayload);
-
-            EvaluationResult result = bidEvaluator.evaluate(bids, room.getConfig(), room.getCurrentRound());
-
-            // 处理道具效果：保险卡（未中标退钱）& 截胡卡（中标价减半）
-            long finalHighestBid = result.getHighestBid();
-            String winnerPid = result.getWinnerId();
-            // 截胡卡：胜者中标价减半
-            if (winnerPid != null) {
-                String discountKey = "halfDiscount:round:" + room.getCurrentRound();
-                String hasDiscount = (String) redis.opsForHash().get(
-                        String.format(STATE_KEY, roomId, winnerPid), discountKey);
-                if ("true".equals(hasDiscount)) {
-                    finalHighestBid = finalHighestBid / 2;
-                    log.info("[Item] 玩家={} 使用截胡卡，中标价减半为 {}", winnerPid, finalHighestBid);
-                    result.setHighestBid(finalHighestBid);
-                }
-            }
-            // 保险卡：所有未中标的保险用户退钱
-            String insuranceKey = "insurance:round:" + room.getCurrentRound();
-            for (Map.Entry<String, Long> e : bids.entrySet()) {
-                String pidStr = e.getKey();
-                if (pidStr.equals(winnerPid)) continue; // 胜者不退
-                String hasInsurance = (String) redis.opsForHash().get(
-                        String.format(STATE_KEY, roomId, pidStr), insuranceKey);
-                if ("true".equals(hasInsurance) && e.getValue() > 0) {
-                    long refund = e.getValue();
-                    long current = getPlayerCoins(roomId, pidStr);
-                    setPlayerCoins(roomId, pidStr, current + refund);
-                    log.info("[Item] 玩家={} 保险卡退款 {}", pidStr, refund);
-                }
-            }
-
-            // 下发模糊/精确反馈
-            for (Long pid : room.getPlayerIds()) {
-                String pidStr = String.valueOf(pid);
-                if (Boolean.TRUE.equals(room.getConfig().getFuzzyFeedback())) {
-                    BidFeedback fb = infoBroker.generateFeedback(pidStr, result.getBids(), result);
-                    log.info("[WS] 私信 playerId={} /queue/feedback type=BID_FEEDBACK feedback={}", pidStr, fb);
-                    messaging.convertAndSendToUser(pidStr, "/queue/feedback",
-                            Map.of("type", "BID_FEEDBACK", "round", room.getCurrentRound(), "feedback", fb));
-                } else {
-                    log.info("[WS] 私信 playerId={} /queue/feedback type=BID_FEEDBACK highestBid={}", pidStr, infoBroker.getExactHighest(result));
-                    messaging.convertAndSendToUser(pidStr, "/queue/feedback",
-                            Map.of("type", "BID_FEEDBACK", "round", room.getCurrentRound(),
-                                   "highestBid", infoBroker.getExactHighest(result)));
-                }
-            }
-
-            switch (result.getOutcome()) {
-                case SPEED_WIN, FINAL_WIN -> {
-                    timerService.cancelTimer(roomId);
-                    enterRevealing(roomId);
-                    revealEngine.reveal(room, result.getWinnerId(), result.getHighestBid(),
-                            startTimes.getOrDefault(roomId, LocalDateTime.now()));
-                    finishGame(roomId);
-                    startTimes.remove(roomId);
-                }
-                case TIE_BREAK -> {
-                    if (room.getTieBreakCount() < room.getConfig().getTieBreakRounds()) {
-                        enterTieBreak(roomId);
-                    } else {
-                        // 超过加赛上限，均分（广播通知，不做金币转移）
-                        broadcast(roomId, "TIE_FINAL", Map.of("round", room.getCurrentRound()));
-                        finishGame(roomId);
+            try {
+                doEvaluate(roomId, room);
+            } catch (Exception ex) {
+                log.error("[Room] roomId={} 判定异常，尝试恢复", roomId, ex);
+                try {
+                    room = getRoom(roomId);
+                    if (room.getState() == GameState.EVALUATING) {
+                        startNewRound(roomId);
                     }
+                } catch (Exception fallbackEx) {
+                    log.error("[Room] roomId={} 恢复失败，强制结束游戏", roomId, fallbackEx);
+                    try { finishGame(roomId); } catch (Exception ignored) {}
                 }
-                case NO_WIN -> enterSkillPhase(roomId);
             }
         } finally {
             lock.unlock();
+        }
+    }
+
+    /** 判定核心逻辑，从 triggerEvaluation 中抽离以便异常恢复 */
+    private void doEvaluate(String roomId, GameRoom room) {
+        // 读取本轮出价
+        String bidKey = String.format(BIDS_KEY, roomId, room.getCurrentRound());
+        Map<Object, Object> rawBids = redis.opsForHash().entries(bidKey);
+        Map<String, Long> bids = new LinkedHashMap<>();
+        // 未出价的玩家视为弃权（-1）
+        for (Long pid : room.getPlayerIds()) {
+            String pidStr = String.valueOf(pid);
+            Object val = rawBids.get(pidStr);
+            bids.put(pidStr, val != null ? Long.parseLong((String) val) : -1L);
+        }
+
+        // 读取本轮道具使用情况
+        String itemsKey = "game:items:" + roomId + ":" + room.getCurrentRound();
+        Map<Object, Object> roundItems = redis.opsForHash().entries(itemsKey);
+        Map<String, String> items = new LinkedHashMap<>();
+        for (Map.Entry<Object, Object> e : roundItems.entrySet()) {
+            items.put((String) e.getKey(), (String) e.getValue());
+        }
+
+        // 广播所有出价信息（供左侧面板显示）
+        Map<String, Object> allBidsPayload = new LinkedHashMap<>();
+        if (Boolean.TRUE.equals(room.getConfig().getBlindBidding())) {
+            List<String> ranking = bids.entrySet().stream()
+                    .filter(e -> e.getValue() >= 0)
+                    .sorted(Map.Entry.<String, Long>comparingByValue().reversed())
+                    .map(Map.Entry::getKey)
+                    .toList();
+            allBidsPayload.put("ranking", ranking);
+        } else {
+            allBidsPayload.put("bids", bids);
+        }
+        allBidsPayload.put("items", items);
+        broadcast(roomId, "ALL_BIDS", allBidsPayload);
+
+        EvaluationResult result = bidEvaluator.evaluate(bids, room.getConfig(), room.getCurrentRound());
+
+        // 处理道具效果：保险卡（未中标退钱）& 截胡卡（中标价减半）
+        long finalHighestBid = result.getHighestBid();
+        String winnerPid = result.getWinnerId();
+        if (winnerPid != null) {
+            String discountKey = "halfDiscount:round:" + room.getCurrentRound();
+            String hasDiscount = (String) redis.opsForHash().get(
+                    String.format(STATE_KEY, roomId, winnerPid), discountKey);
+            if ("true".equals(hasDiscount)) {
+                finalHighestBid = finalHighestBid / 2;
+                log.info("[Item] 玩家={} 使用截胡卡，中标价减半为 {}", winnerPid, finalHighestBid);
+                result.setHighestBid(finalHighestBid);
+            }
+        }
+        String insuranceKey = "insurance:round:" + room.getCurrentRound();
+        for (Map.Entry<String, Long> e : bids.entrySet()) {
+            String pidStr = e.getKey();
+            if (pidStr.equals(winnerPid)) continue;
+            String hasInsurance = (String) redis.opsForHash().get(
+                    String.format(STATE_KEY, roomId, pidStr), insuranceKey);
+            if ("true".equals(hasInsurance) && e.getValue() > 0) {
+                long refund = e.getValue();
+                long current = getPlayerCoins(roomId, pidStr);
+                setPlayerCoins(roomId, pidStr, current + refund);
+                log.info("[Item] 玩家={} 保险卡退款 {}", pidStr, refund);
+            }
+        }
+
+        // 下发模糊/精确反馈
+        for (Long pid : room.getPlayerIds()) {
+            String pidStr = String.valueOf(pid);
+            if (Boolean.TRUE.equals(room.getConfig().getFuzzyFeedback())) {
+                BidFeedback fb = infoBroker.generateFeedback(pidStr, result.getBids(), result);
+                messaging.convertAndSendToUser(pidStr, "/queue/feedback",
+                        Map.of("type", "BID_FEEDBACK", "round", room.getCurrentRound(), "feedback", fb));
+            } else {
+                messaging.convertAndSendToUser(pidStr, "/queue/feedback",
+                        Map.of("type", "BID_FEEDBACK", "round", room.getCurrentRound(),
+                               "highestBid", infoBroker.getExactHighest(result)));
+            }
+        }
+
+        switch (result.getOutcome()) {
+            case SPEED_WIN, FINAL_WIN -> {
+                timerService.cancelTimer(roomId);
+                enterRevealing(roomId);
+                revealEngine.reveal(room, result.getWinnerId(), result.getHighestBid(),
+                        startTimes.getOrDefault(roomId, LocalDateTime.now()));
+                finishGame(roomId);
+                startTimes.remove(roomId);
+            }
+            case TIE_BREAK -> {
+                if (room.getTieBreakCount() < room.getConfig().getTieBreakRounds()) {
+                    enterTieBreak(roomId);
+                } else {
+                    broadcast(roomId, "TIE_FINAL", Map.of("round", room.getCurrentRound()));
+                    finishGame(roomId);
+                }
+            }
+            case NO_WIN -> startNewRound(roomId);
         }
     }
 
@@ -633,6 +668,18 @@ public class RoomManager {
         String bidKey = String.format(BIDS_KEY, roomId, room.getCurrentRound());
         redis.delete(bidKey);
         log.info("[Room] roomId={} tie-break 清除旧出价 key={}", roomId, bidKey);
+
+        // 恢复本轮已使用的 buff 道具（翻倍卡/加价券），因 consumePendingBuff 在首次出价时已删除 pendingBuff
+        String itemsKey = "game:items:" + roomId + ":" + room.getCurrentRound();
+        Map<Object, Object> roundItems = redis.opsForHash().entries(itemsKey);
+        for (Map.Entry<Object, Object> e : roundItems.entrySet()) {
+            String pidStr = (String) e.getKey();
+            String itemType = (String) e.getValue();
+            if ("DOUBLE_BID".equals(itemType) || "EXTRA_3000".equals(itemType)) {
+                redis.opsForHash().put(String.format(STATE_KEY, roomId, pidStr), "pendingBuff", itemType);
+                log.info("[TieBreak] 恢复玩家={} 的增益道具={}", pidStr, itemType);
+            }
+        }
 
         setState(roomId, room, GameState.TIE_BREAK);
         log.info("[Room] roomId={} → TIE_BREAK 第{}次加赛", (Object) roomId, (Object) room.getTieBreakCount());

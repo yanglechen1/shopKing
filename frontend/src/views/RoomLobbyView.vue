@@ -175,7 +175,7 @@ onMounted(async () => {
           readySet.value = new Set((msg.payload.readyPlayerIds ?? []).map(String))
           players.value = msg.payload.playerIds
         }
-        if (msg.type === 'SKILL_PHASE_START') {
+        if (msg.type === 'ROUND_START') {
           router.push(`/room/${roomId}`)
         }
       })

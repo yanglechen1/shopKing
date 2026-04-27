@@ -5,7 +5,10 @@
       "Bash(npm install *)",
       "Bash(npm run *)",
       "Bash(mvn compile *)",
-      "Bash(mysql *)"
+      "Bash(mysql *)",
+      "Bash(where mvn *)",
+      "Read(//d/Program Files/Apache/maven/bin/**)",
+      "Read(//c/Program Files/Maven/bin/**)"
     ]
   }
 }

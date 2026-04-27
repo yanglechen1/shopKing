@@ -2,8 +2,19 @@
   <div class="modal-mask" @click.self="$emit('close')">
     <div class="modal">
       <h3>本局配置</h3>
+      <label>仓库主题
+        <select v-model="local.warehouseTheme" :disabled="!editable">
+          <option v-for="t in themeOptions" :key="t.key" :value="t.key">{{ t.name }}</option>
+          <option value="RANDOM">随机</option>
+        </select>
+      </label>
+      <label>仓库地区
+        <select v-model="local.warehouseRegion" :disabled="!editable">
+          <option v-for="r in regionOptions" :key="r.key" :value="r.key">{{ r.name }}</option>
+          <option value="RANDOM">随机</option>
+        </select>
+      </label>
       <label>出价倒计时(秒) <input v-model.number="local.bidTimeSecs"    type="number" :disabled="!editable" /></label>
-      <label>技能阶段(秒)   <input v-model.number="local.skillPhaseSecs" type="number" :disabled="!editable" /></label>
       <label>拍卖轮次       <input v-model.number="local.totalRounds" type="number" :disabled="!editable" /></label>
       <label>Grace Period(ms) <input v-model.number="local.gracePeriodMs" type="number" :disabled="!editable" /></label>
       <label>暗标模式       <input v-model="local.blindBidding"  type="checkbox" :disabled="!editable" /></label>
@@ -18,7 +29,7 @@
 </template>
 
 <script setup>
-import { ref, watch } from 'vue'
+import { ref, watch, computed } from 'vue'
 
 const props = defineProps({ config: Object, editable: Boolean, roomId: String })
 const emit = defineEmits(['close', 'saved'])
@@ -29,6 +40,26 @@ const saved = ref(false)
 
 // 同步外部 config 变化
 watch(() => props.config, v => { local.value = { ...v } })
+
+const themeOptions = computed(() => {
+  try {
+    if (typeof props.config.warehouseThemes === 'string')
+      return JSON.parse(props.config.warehouseThemes)
+    if (Array.isArray(props.config.warehouseThemes))
+      return props.config.warehouseThemes
+  } catch (e) { /* ignore */ }
+  return []
+})
+
+const regionOptions = computed(() => {
+  try {
+    if (typeof props.config.warehouseRegions === 'string')
+      return JSON.parse(props.config.warehouseRegions)
+    if (Array.isArray(props.config.warehouseRegions))
+      return props.config.warehouseRegions
+  } catch (e) { /* ignore */ }
+  return []
+})
 
 async function save() {
   await axios.put(`/api/room/${props.roomId}/config`, local.value)

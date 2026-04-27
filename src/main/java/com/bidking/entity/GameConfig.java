@@ -28,11 +28,21 @@ public class GameConfig {
     private Integer gracePeriodMs = 3000;  // 出价冗余时间（毫秒）
 
     private String speedWinRatios;         // JSON array: [1.8,1.5,1.3,1.15]
-    private Integer warehouseSizeMin = 10;
-    private Integer warehouseSizeMax = 20;
+    private Integer warehouseSizeMin = 20;
+    private Integer warehouseSizeMax = 100;
     private Boolean blackBoxEnabled = true;
     private Integer revealDelaySecs = 2;
     private String qualityWeights;         // JSON object: {"COMMON":50,...}
+
+    // ── 仓库主题与地区配置 ──────────────────────────
+    /** 仓库主题: Category枚举名 / "UNKNOWN" / "RANDOM" */
+    private String warehouseTheme = "RANDOM";
+    /** 仓库地区: Region key / "RANDOM" */
+    private String warehouseRegion = "RANDOM";
+    /** Region 预设 JSON 数组，可热更新品质权重和数量范围 */
+    private String warehouseRegions;
+    /** Theme 预设 JSON 数组，可热更新品类权重 */
+    private String warehouseThemes;
 
     // ── 信息透明度配置 ──────────────────────────
     /** true=暗标（看不到他人出价），false=明标（可看到他人每轮出价） */

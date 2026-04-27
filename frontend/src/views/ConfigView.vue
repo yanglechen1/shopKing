@@ -4,7 +4,6 @@
     <label>玩家人数 <input v-model.number="cfg.playerCount" type="number" min="2" max="8" /></label>
     <label>初始金币 <input v-model.number="cfg.initialCoins" type="number" /></label>
     <label>出价倒计时(秒) <input v-model.number="cfg.bidTimeSecs" type="number" /></label>
-    <label>技能阶段(秒) <input v-model.number="cfg.skillPhaseSecs" type="number" /></label>
     <label>Grace Period(ms) <input v-model.number="cfg.gracePeriodMs" type="number" /></label>
     <label>速胜轮数 <input v-model.number="cfg.speedWinRounds" type="number" /></label>
     <label>暗标模式 <input v-model="cfg.blindBidding" type="checkbox" /></label>

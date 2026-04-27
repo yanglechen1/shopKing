@@ -161,16 +161,26 @@ public class GameConfig {
     private List<Double> speedWinRatios = List.of(1.8, 1.5, 1.3, 1.15);
 
     // ── 仓库配置 ──────────────────────────────
-    private int warehouseSizeMin = 10;     // 仓库最少格数
-    private int warehouseSizeMax = 20;     // 仓库最多格数
+    private int warehouseSizeMin = 10;     // 仓库最少格数（旧模式回退用）
+    private int warehouseSizeMax = 20;     // 仓库最多格数（旧模式回退用）
     private boolean blackBoxEnabled = true;
     private int revealDelaySecs = 2;       // 开箱每件物品揭晓延迟（秒）
 
-    // ── 品质权重（影响随机生成概率）─────────────
+    // ── 品质权重（旧模式回退用）─────────────
     // key: Quality 枚举, value: 权重整数
     // 示例：{COMMON:50, RARE:30, EPIC:15, LEGEND:4, MYTH:1}
     @Convert(converter = QualityWeightConverter.class)
     private Map<Quality, Integer> qualityWeights;
+
+    // ── 仓库主题与地区（Theme × Region 模式）──
+    /** 仓库主题: Category枚举名 / "UNKNOWN" / "RANDOM" */
+    private String warehouseTheme = "RANDOM";
+    /** 仓库地区: Region key / "RANDOM" */
+    private String warehouseRegion = "RANDOM";
+    /** Region 预设 JSON 数组，可热更新品质权重和数量范围 */
+    private String warehouseRegions;
+    /** Theme 预设 JSON 数组，可热更新品类权重 */
+    private String warehouseThemes;
 }
 ```
 
@@ -478,37 +488,64 @@ public class TimerService {
 }
 ```
 
-### 7.5 RngManager（仓库生成）
+### 7.5 RngManager（仓库生成）— Theme × Region 双维模式
 
 ```java
 public class RngManager {
     /**
-     * 根据配置权重随机生成仓库
-     * 保证期望价值在合理范围内（防止全废铁或全神话）
+     * Theme × Region 双维仓库生成
+     * Region 决定仓库大小 + 品质分布，Theme 决定品类偏向
+     * 未配置 JSON 列时回退旧模式（warehouseSizeMin/Max + qualityWeights）
      */
-    public Warehouse generate(GameConfig config) {
-        int size = ThreadLocalRandom.current()
-            .nextInt(config.getWarehouseSizeMin(),
-                     config.getWarehouseSizeMax() + 1);
+    public List<Map<String, Object>> generate(GameConfig config) {
+        // 1. 解析 Region/Theme 预设 JSON
+        List<WarehouseRegion> regions = parseRegions(config);
+        List<WarehouseTheme> themes = parseThemes(config);
 
-        List<Item> items = new ArrayList<>();
-        for (int i = 0; i < size; i++) {
-            Quality q = weightedRandom(config.getQualityWeights());
-            ItemTemplate template = itemTemplateDao.randomByQuality(q);
-            long value = ThreadLocalRandom.current()
-                .nextLong(template.getValueMin(), template.getValueMax() + 1);
-            items.add(new Item(template, value));
+        if (regions 不为空 && themes 不为空) {
+            // 2. 解析 region（RANDOM → 随机选，否则按 key 匹配）
+            WarehouseRegion region = resolveRegion(config.getWarehouseRegion(), regions);
+            // 3. 解析 theme（RANDOM → 随机选，否则按 key 匹配）
+            WarehouseTheme theme = resolveTheme(config.getWarehouseTheme(), themes);
+
+            // 4. region 提供物品数量范围和品质权重
+            int size = random(region.itemCountMin, region.itemCountMax);
+            Map<String,Integer> qualityWeights = region.qualityWeights;
+
+            // 5. theme 提供品类权重
+            Map<String,Integer> categoryWeights = theme.categoryWeights;
+
+            // 6. 逐物品：品质×品类双维加权 → 精确命中模板
+            for (i in size) {
+                quality  = weightedRandom(qualityWeights);
+                category = weightedRandom(categoryWeights);
+                tpl = mapper.randomByQualityAndCategory(quality, category);
+                if (tpl == null) tpl = mapper.randomByQuality(quality); // fallback
+                items.add(buildItem(tpl));
+            }
+        } else {
+            // 旧模式回退
         }
 
-        // 黑匣子逻辑
-        if (config.isBlackBoxEnabled() && shouldInsertBlackBox()) {
-            items.add(generateBlackBox());
-        }
-
-        return new Warehouse(items);
+        // 7. 黑匣子 + 网格分配
+        finishItems(items, config);
+        return items;
     }
 }
 ```
+
+**Region 预设（4档，存 JSON 可热更新）：**
+
+| Key | 名称 | 物品数 | 品质权重(白/绿/蓝/紫/金/红) |
+|-----|------|--------|--------------------------|
+| DELIVERY_STATION | 快递站 | 5~10 | 45/25/15/8/5/2 |
+| VILLA | 别墅 | 10~18 | 35/28/18/12/5/2 |
+| MUSEUM | 博物馆 | 15~25 | 8/12/18/28/22/12 |
+| SHIPWRECK | 沉船 | 18~30 | 10/15/20/25/20/10 |
+
+**Theme 预设（11个，存 JSON 可热更新）：**
+
+10个品类各一个主题（主品类 40%，其余均分）+ UNKNOWN 未知盲盒（10品类各 10%）
 
 ---
 

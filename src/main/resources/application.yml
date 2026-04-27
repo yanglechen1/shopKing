@@ -1,0 +1,57 @@
+server:
+  port: 8080
+
+spring:
+  datasource:
+    url: jdbc:mysql://localhost:3306/bidking?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
+    username: root
+    password: abc123
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  redis:
+    host: localhost
+    port: 6379
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    db-config:
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+jwt:
+  secret: bidking-secret-key-must-be-at-least-256-bits-long-for-hs256
+  expiration: 86400000
+
+# ============================================================
+# 限流配置（每个规则均有中文注释说明限制原因）
+# 修改配置后重启生效。键名对应 @RateLimit("xxx") 注解的 value。
+# ============================================================
+rate-limit:
+  rules:
+    # ====== 认证 ======
+    login:            { max: 5,  window: 60 }   # 登录：防暴力破解，每60秒最多5次
+    register:         { max: 3,  window: 60 }   # 注册：防批量注册账号
+
+    # ====== 房间管理 ======
+    createRoom:       { max: 3,  window: 60 }   # 创建房间：防刷房占Redis内存
+    joinRoom:         { max: 10, window: 60 }   # 加入房间：防恶意频繁join
+    startGame:        { max: 3,  window: 60 }   # 开始游戏：防止重复误触导致状态错乱
+    ready:            { max: 10, window: 60 }   # 准备/取消准备：正常操作频率
+    getRoom:          { max: 30, window: 60 }   # 查房间：防轮询轰炸（前端应WS驱动）
+    updateConfig:     { max: 5,  window: 60 }   # 更新配置：低频管理操作
+    kickPlayer:       { max: 5,  window: 60 }   # 踢人：防恶意频繁踢人
+
+    # ====== 角色选择 ======
+    selectCharacter:  { max: 10, window: 60 }   # 选择角色：正常操作频率
+
+    # ====== 核心玩法 ======
+    useSkill:         { max: 3,  window: 60 }   # 使用技能：SETNX已防重，限流做纵深防御
+    submitBid:        { max: 5,  window: 60 }   # 提交出价：SETNX已防重，限流防无效请求轰炸
+    reconnect:        { max: 5,  window: 60 }   # 断线重连：重连频繁说明网络异常
+
+    # ====== 全局管理 ======
+    getGlobalConfig:  { max: 10, window: 60 }   # 查全局配置：读操作
+    updateGlobalConfig: { max: 5, window: 60 }  # 修改全局配置：管理员专用

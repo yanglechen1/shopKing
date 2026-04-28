@@ -27,5 +27,8 @@ Thumbs.db
 .env
 .env.local
 
-# Local doc (tracked only locally, not pushed)
+# 本地文档（仅限本地追踪，不上 GitHub）
 bug.md
+technical_ref.md
+BidKing_PRD.md
+frontend/README.md

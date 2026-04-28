@@ -41,25 +41,13 @@ const saved = ref(false)
 // 同步外部 config 变化
 watch(() => props.config, v => { local.value = { ...v } })
 
-const themeOptions = computed(() => {
-  try {
-    if (typeof props.config.warehouseThemes === 'string')
-      return JSON.parse(props.config.warehouseThemes)
-    if (Array.isArray(props.config.warehouseThemes))
-      return props.config.warehouseThemes
-  } catch (e) { /* ignore */ }
-  return []
-})
+const themeOptions = computed(() =>
+  Array.isArray(props.config.themeOptions) ? props.config.themeOptions : []
+)
 
-const regionOptions = computed(() => {
-  try {
-    if (typeof props.config.warehouseRegions === 'string')
-      return JSON.parse(props.config.warehouseRegions)
-    if (Array.isArray(props.config.warehouseRegions))
-      return props.config.warehouseRegions
-  } catch (e) { /* ignore */ }
-  return []
-})
+const regionOptions = computed(() =>
+  Array.isArray(props.config.regionOptions) ? props.config.regionOptions : []
+)
 
 async function save() {
   await axios.put(`/api/room/${props.roomId}/config`, local.value)

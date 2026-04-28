@@ -149,7 +149,7 @@ onMounted(async () => {
   const res = await axios.get(`/api/room/${roomId}`)
   hostId.value = res.data.hostId
   players.value = res.data.playerIds
-  cfg.value = { ...res.data.config }
+  cfg.value = { ...res.data.config, regionOptions: res.data.regionOptions ?? [], themeOptions: res.data.themeOptions ?? [] }
   readySet.value = new Set((res.data.readyPlayerIds ?? []).map(String))
   playerCharacters.value = res.data.playerCharacters || {}
 

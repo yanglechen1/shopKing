@@ -2,7 +2,8 @@
   <div class="room">
     <div class="header">
       <span>房间: {{ roomId }}</span>
-      <span>第 {{ game.round }} 轮</span>
+      <span v-if="themeName || regionName" class="header-theme">{{ themeName }} / {{ regionName }}</span>
+      <span v-if="game.round > 0">第 {{ game.round }} / {{ totalRounds }} 轮</span>
       <span>状态: {{ stateLabel }}</span>
     </div>
 
@@ -17,25 +18,23 @@
             <span class="pc-char">{{ getCharName(playerChars[pid]) }}</span>
           </div>
           <div class="pc-rounds">
-            <div v-for="(rd, ri) in game.roundHistory" :key="ri" class="pc-round-entry">
-              <div class="pc-round-box" :title="itemTooltip(rd.items, pid)">
-                <span v-if="rd.items && rd.items[pid]" class="pc-box-item">{{ itemShort(rd.items[pid]) }}</span>
+            <div v-for="(slot, ri) in roundSlots" :key="ri" class="pc-round-entry">
+              <div class="pc-round-box"
+                   :class="{ 'pc-cur-box': slot.isCurrent, 'pc-future-box': slot.isFuture }"
+                   :title="slot.isComplete ? itemTooltip(slot.history.items, pid) : ''">
+                <span v-if="slot.isComplete && slot.history.items && slot.history.items[pid]" class="pc-box-item">{{ itemShort(slot.history.items[pid]) }}</span>
+                <span v-else-if="slot.isCurrent && (game.state === 'BIDDING' || game.state === 'GRACE_PERIOD')">...</span>
               </div>
-              <div v-if="blindBidding" class="pc-round-label">
-                <span v-if="rd.ranking" class="pc-rank-val">{{ rd.ranking.indexOf(pid) + 1 }}</span>
-                <span v-else class="pc-pass-val">-</span>
-              </div>
-              <div v-else class="pc-round-label">
-                <span v-if="rd.bids && Number(rd.bids[pid]) >= 0" class="pc-bid-val">{{ formatBid(Number(rd.bids[pid])) }}</span>
-                <span v-else class="pc-pass-val">弃权</span>
-              </div>
-            </div>
-            <div v-if="game.state === 'BIDDING' || game.state === 'GRACE_PERIOD'" class="pc-round-entry">
-              <div class="pc-round-box pc-cur-box">...</div>
               <div class="pc-round-label">
-                <span :class="'pc-cur ' + (hasBid(pid) ? 'cur-yes' : 'cur-no')">
+                <template v-if="slot.isComplete">
+                  <span v-if="blindBidding && slot.history.ranking != null" class="pc-rank-val">{{ slot.history.ranking.indexOf(pid) + 1 }}</span>
+                  <span v-else-if="!blindBidding && slot.history.bids && Number(slot.history.bids[pid]) >= 0" class="pc-bid-val">{{ formatBid(Number(slot.history.bids[pid])) }}</span>
+                  <span v-else class="pc-pass-val">弃权</span>
+                </template>
+                <span v-else-if="slot.isCurrent && (game.state === 'BIDDING' || game.state === 'GRACE_PERIOD')" :class="'pc-cur ' + (hasBid(pid) ? 'cur-yes' : 'cur-no')">
                   {{ hasBid(pid) ? '已出价' : '未出价' }}
                 </span>
+                <span v-else class="pc-pass-val">-</span>
               </div>
             </div>
           </div>
@@ -208,6 +207,9 @@ const myCharacter = computed(() => playerChars.value[String(auth.playerId)] || n
 // Warehouse & config
 const warehouse = ref([])
 const blindBidding = ref(true)
+const totalRounds = ref(10)
+const themeName = ref('')
+const regionName = ref('')
 
 // Bidding state (inline, replaces BiddingPanel)
 // bidSubmitted 已移至 store，ROUND_START 时自动复位
@@ -249,6 +251,24 @@ function getItemName(type) { return itemNames[type] || type }
 function hasBid(pid) {
   return game.playerBids && game.playerBids[String(pid)]
 }
+
+const roundSlots = computed(() => {
+  const current = game.round
+  if (current === 0) return []
+  const total = Math.max(totalRounds.value, game.roundHistory.length + 1)
+  const slots = []
+  for (let i = 1; i <= total; i++) {
+    const histEntry = game.roundHistory.find(h => h.round === i)
+    slots.push({
+      round: i,
+      isComplete: !!histEntry,
+      isCurrent: !histEntry && i === current,
+      isFuture: !histEntry && i > current,
+      history: histEntry || null
+    })
+  }
+  return slots
+})
 
 function itemShort(type) { return ITEM_SHORT[type] || '' }
 function itemTooltip(items, pid) {
@@ -356,6 +376,17 @@ async function fetchRoomData() {
     playerList.value = (res.data.playerIds || []).map(String)
     playerChars.value = res.data.playerCharacters || {}
     blindBidding.value = res.data.config?.blindBidding !== false
+    // 主题/地区名称
+    const cfg = res.data.config || {}
+    totalRounds.value = cfg.totalRounds || 10
+    const themeKey = cfg.warehouseTheme
+    const regionKey = cfg.warehouseRegion
+    const themeOpts = res.data.themeOptions || []
+    const regionOpts = res.data.regionOptions || []
+    const ft = themeOpts.find(t => t.key === themeKey)
+    const fr = regionOpts.find(r => r.key === regionKey)
+    themeName.value = ft ? ft.name : themeKey || ''
+    regionName.value = fr ? fr.name : regionKey || ''
   } catch (e) {
     console.warn('[RoomView] 获取房间数据失败', e)
   }
@@ -560,4 +591,9 @@ function useItem(itemType) {
 .restart-btn { padding: 10px 20px; background: #e94560; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
 
 .err { color: #ff6b6b; font-size: 0.9rem; }
+
+/* 未开始的轮次灰框 */
+.pc-future-box { border-color: #333; background: #111; opacity: 0.35; }
+/* 主题/地区显示 */
+.header-theme { color: #ffd700; font-size: 0.9rem; }
 </style>

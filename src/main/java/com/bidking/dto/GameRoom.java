@@ -22,8 +22,8 @@ public class GameRoom {
     /** 当前游戏状态，由 RoomManager 统一驱动 */
     private GameState state = GameState.WAITING;
 
-    /** 当前轮次（1-based，WAITING 时为 0） */
-    private int currentRound = 0;
+    /** 当前轮次（1-based：第1轮=1，游戏初始即为1，无 0 值语义） */
+    private int currentRound = 1;
 
     /** 本轮出价截止时间戳（Unix ms），客户端用于倒计时同步 */
     private long roundDeadline = 0L;

@@ -67,9 +67,19 @@ public class BidEvaluator {
             log.info("[Eval] 第{}轮 决战胜出 winner={} bid={}", round, p1Id, p1);
             return result;
         }
+        // 防御：round 必须从 1 开始
+        if (round <= 0) {
+            log.error("[Eval] 轮数异常 round={}，重置为 1", round);
+            round = 1;
+        }
 
         // 速胜判定
-        List<Double> ratios = objectMapper.readValue(config.getSpeedWinRatios(), new TypeReference<>() {});
+        String speedWinRatios = config.getSpeedWinRatios();
+        if (speedWinRatios == null || speedWinRatios.isBlank()) {
+            log.error("[Eval] 第{}轮 speedWinRatios 为空，使用默认值", round);
+            speedWinRatios = "[1.8,1.5,1.3,1.15]";
+        }
+        List<Double> ratios = objectMapper.readValue(speedWinRatios, new TypeReference<>() {});
         if (round - 1 >= ratios.size()) {
             log.error("[Eval] 速胜倍率数组长度不足 ratios.size={} round={}", ratios.size(), round);
             throw new IllegalStateException("速胜倍率配置错误，第" + round + "轮无对应倍率");

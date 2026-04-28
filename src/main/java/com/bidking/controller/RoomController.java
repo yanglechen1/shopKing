@@ -2,10 +2,15 @@ package com.bidking.controller;
 
 import com.bidking.annotation.RateLimit;
 import com.bidking.entity.GameConfig;
+import com.bidking.entity.RegionPreset;
+import com.bidking.entity.ThemePreset;
+import com.bidking.mapper.RegionPresetMapper;
+import com.bidking.mapper.ThemePresetMapper;
 import com.bidking.service.RoomManager;
 import com.bidking.service.SkillEngine;
 import com.bidking.enums.GameState;
 import com.bidking.dto.GameRoom;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -15,6 +20,7 @@ import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * 房间管理接口
@@ -29,6 +35,9 @@ public class RoomController {
     private final RoomManager roomManager;
     private final SkillEngine skillEngine;
     private final StringRedisTemplate redisTemplate;
+    private final ObjectMapper objectMapper;
+    private final RegionPresetMapper regionPresetMapper;
+    private final ThemePresetMapper themePresetMapper;
 
     /** 创建房间（每60秒最多3次，防刷房） */
     @RateLimit("createRoom")
@@ -95,19 +104,35 @@ public class RoomController {
         return ResponseEntity.ok(sanitizeRoom(room));
     }
 
-    /** 移除仓库中每件物品的 value 字段，防止实际价值泄露给客户端 */
+    /**
+     * 脱敏房间数据，防止权重/价值泄露给客户端
+     * - 移除 warehouse 每件物品的 value
+     * - 移除 config 中的 warehouseRegions/warehouseThemes（权重数据）
+     * - 注入 regionOptions/themeOptions（仅 key+name）
+     */
     private Map<String, Object> sanitizeRoom(GameRoom room) {
         Map<String, Object> map = new java.util.LinkedHashMap<>();
         map.put("roomId", room.getRoomId());
         map.put("state", room.getState());
         map.put("currentRound", room.getCurrentRound());
         map.put("roundDeadline", room.getRoundDeadline());
-        map.put("config", room.getConfig());
+
+        // config 转为 Map 后再移除敏感字段
+        Map<String, Object> configMap = objectMapper.convertValue(room.getConfig(), Map.class);
+        configMap.remove("warehouseRegions");
+        configMap.remove("warehouseThemes");
+        map.put("config", configMap);
+
         map.put("hostId", room.getHostId());
         map.put("playerIds", room.getPlayerIds());
         map.put("playerCharacters", room.getPlayerCharacters());
         map.put("readyPlayerIds", room.getReadyPlayerIds());
         map.put("tieBreakCount", room.getTieBreakCount());
+
+        // 注入脱敏后的地区/主题选项（从 DB 预设表读取，仅 key + name）
+        map.put("regionOptions", loadRegionOptions());
+        map.put("themeOptions", loadThemeOptions());
+
         if (room.getWarehouse() != null) {
             List<Map<String, Object>> safeWarehouse = new java.util.ArrayList<>();
             for (Map<String, Object> item : room.getWarehouse()) {
@@ -120,6 +145,20 @@ public class RoomController {
             map.put("warehouse", null);
         }
         return map;
+    }
+
+    /** 从 region_preset 表加载地区选项（仅 key + name） */
+    private List<Map<String, String>> loadRegionOptions() {
+        return regionPresetMapper.selectList(null).stream()
+                .map(r -> Map.of("key", r.getRegionKey(), "name", r.getName()))
+                .collect(Collectors.toList());
+    }
+
+    /** 从 theme_preset 表加载主题选项（仅 key + name） */
+    private List<Map<String, String>> loadThemeOptions() {
+        return themePresetMapper.selectList(null).stream()
+                .map(t -> Map.of("key", t.getThemeKey(), "name", t.getName()))
+                .collect(Collectors.toList());
     }
 
     /** 房主更新本局配置（每60秒最多5次） */

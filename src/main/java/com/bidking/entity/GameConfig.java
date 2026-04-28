@@ -27,7 +27,7 @@ public class GameConfig {
     private Integer bidTimeSecs = 30;      // 出价倒计时（秒）
     private Integer gracePeriodMs = 3000;  // 出价冗余时间（毫秒）
 
-    private String speedWinRatios;         // JSON array: [1.8,1.5,1.3,1.15]
+    private String speedWinRatios = "[1.8,1.5,1.3,1.15]";         // JSON array: [1.8,1.5,1.3,1.15]
     private Integer warehouseSizeMin = 20;
     private Integer warehouseSizeMax = 100;
     private Boolean blackBoxEnabled = true;

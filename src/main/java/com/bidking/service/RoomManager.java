@@ -389,6 +389,10 @@ public class RoomManager {
         GameRoom room = getRoom(roomId);
         if (!room.getHostId().equals(requesterId)) throw new IllegalStateException("只有房主可修改配置");
         if (room.getState() != GameState.WAITING) throw new IllegalStateException("游戏已开始，无法修改配置");
+
+        // weightDeviation 由全局配置控制，不从房间级配置修改
+        newConfig.setWeightDeviation(room.getConfig().getWeightDeviation());
+
         room.setConfig(newConfig);
         saveRoom(room);
         log.info("[Room] roomId={} 房主={} 更新配置", roomId, requesterId);
@@ -424,8 +428,10 @@ public class RoomManager {
         initPlayerStates(room);
         log.info("[Room] 仓库已生成 roomId={} 物品数={}", roomId, room.getWarehouse().size());
         startTimes.put(roomId, LocalDateTime.now());
-        // 跳过 SKILL_PHASE，直接进入 BIDDING
-        startNewRound(roomId);
+        // 直接从第1轮开始，不使用 startNewRound（递增逻辑从下一轮才开始）
+        room.setCurrentRound(1);
+        saveRoom(room);
+        enterBidding(roomId);
     }
 
     /**
@@ -456,10 +462,16 @@ public class RoomManager {
                 "kicked", true));
     }
 
-    /** 进入下一轮（跳过 SKILL_PHASE，直接进入 BIDDING） */
+    /** 进入下一轮（在 startGame 之后调用，用于第二轮及以后） */
     public void startNewRound(String roomId) {
         GameRoom room = getRoom(roomId);
-        room.setCurrentRound(room.getCurrentRound() + 1);
+        int round = room.getCurrentRound();
+        // 防御：确保轮数从 1 开始递增，拒绝 0 或负数
+        if (round < 1) {
+            log.warn("[Room] roomId={} currentRound={} 异常，重置为 1", roomId, round);
+            round = 1;
+        }
+        room.setCurrentRound(round + 1);
 
         // 清理所有玩家上轮残留的 pendingBuff，防止未出价情况下的效果跨轮
         for (Long pid : room.getPlayerIds()) {
@@ -478,6 +490,8 @@ public class RoomManager {
             return;
         }
 
+        // 先保存轮数到 Redis，避免 enterBidding 重新加载时读到旧值
+        saveRoom(room);
         enterBidding(roomId);
     }
 
@@ -507,6 +521,11 @@ public class RoomManager {
     /** 进入 Grace Period（对客户端透明，UI 显示"等待结果"） */
     public void enterGracePeriod(String roomId) {
         GameRoom room = getRoom(roomId);
+        // 防止计时器竞争：如果游戏已进入判定或结束，跳过 Grace Period
+        if (room.getState() != GameState.BIDDING) {
+            log.info("[Room] roomId={} 状态={} 跳过 Grace Period（非 BIDDING）", roomId, room.getState());
+            return;
+        }
         setState(roomId, room, GameState.GRACE_PERIOD);
         log.info("[Room] roomId={} 第{}轮 → GRACE_PERIOD ({}ms)", (Object) roomId, (Object) room.getCurrentRound(), (Object) room.getConfig().getGracePeriodMs());
 
@@ -723,8 +742,8 @@ public class RoomManager {
             redis.delete("game:items:" + roomId + ":" + r);
         }
 
-        // 重置房间状态
-        room.setCurrentRound(0);
+        // 重置房间状态（currentRound=1 表示下一局从第1轮开始）
+        room.setCurrentRound(1);
         room.setTieBreakCount(0);
         room.setWarehouse(null);
         room.setState(GameState.WAITING);

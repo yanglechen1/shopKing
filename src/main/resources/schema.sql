@@ -36,12 +36,53 @@ CREATE TABLE game_config (
                              total_rounds        INT DEFAULT 10 COMMENT '拍卖轮次：每局总轮数，替代速胜+决战轮数',
                              warehouse_theme     VARCHAR(50) DEFAULT 'RANDOM' COMMENT '仓库主题: Category枚举名/UNKNOWN/RANDOM',
                              warehouse_region    VARCHAR(50) DEFAULT 'RANDOM' COMMENT '仓库地区: Region key/RANDOM',
-                             warehouse_regions   JSON NOT NULL DEFAULT (JSON_ARRAY(JSON_OBJECT('key','DELIVERY_STATION','name','快递站','itemCountMin',5,'itemCountMax',10,'weight',30,'qualityWeights',JSON_OBJECT('WHITE',45,'GREEN',25,'BLUE',15,'PURPLE',8,'GOLD',5,'RED',2)),JSON_OBJECT('key','VILLA','name','别墅','itemCountMin',10,'itemCountMax',18,'weight',40,'qualityWeights',JSON_OBJECT('WHITE',35,'GREEN',28,'BLUE',18,'PURPLE',12,'GOLD',5,'RED',2)),JSON_OBJECT('key','MUSEUM','name','博物馆','itemCountMin',15,'itemCountMax',25,'weight',20,'qualityWeights',JSON_OBJECT('WHITE',8,'GREEN',12,'BLUE',18,'PURPLE',28,'GOLD',22,'RED',12)),JSON_OBJECT('key','SHIPWRECK','name','沉船','itemCountMin',18,'itemCountMax',30,'weight',10,'qualityWeights',JSON_OBJECT('WHITE',10,'GREEN',15,'BLUE',20,'PURPLE',25,'GOLD',20,'RED',10)))) COMMENT '地区预设列表(JSON数组)，key/name/itemCountMin/itemCountMax/weight/qualityWeights',
-                             warehouse_themes    JSON NOT NULL DEFAULT (JSON_ARRAY(JSON_OBJECT('key','FURNITURE','name','家具天堂','categoryWeights',JSON_OBJECT('FURNITURE',40,'DIGITAL',7,'ANTIQUE',7,'BOOK',7,'JEWELRY',7,'FOOD',6,'ELECTRONICS',6,'ART',7,'MUSICAL',6,'WEAPON',7)),JSON_OBJECT('key','DIGITAL','name','数码实验室','categoryWeights',JSON_OBJECT('FURNITURE',7,'DIGITAL',40,'ANTIQUE',7,'BOOK',7,'JEWELRY',7,'FOOD',6,'ELECTRONICS',6,'ART',7,'MUSICAL',6,'WEAPON',7)),JSON_OBJECT('key','ANTIQUE','name','古董地窖','categoryWeights',JSON_OBJECT('FURNITURE',7,'DIGITAL',7,'ANTIQUE',40,'BOOK',7,'JEWELRY',7,'FOOD',6,'ELECTRONICS',6,'ART',7,'MUSICAL',6,'WEAPON',7)),JSON_OBJECT('key','BOOK','name','古典书房','categoryWeights',JSON_OBJECT('FURNITURE',7,'DIGITAL',7,'ANTIQUE',7,'BOOK',40,'JEWELRY',7,'FOOD',6,'ELECTRONICS',6,'ART',7,'MUSICAL',6,'WEAPON',7)),JSON_OBJECT('key','JEWELRY','name','珠宝金库','categoryWeights',JSON_OBJECT('FURNITURE',7,'DIGITAL',7,'ANTIQUE',7,'BOOK',7,'JEWELRY',40,'FOOD',6,'ELECTRONICS',6,'ART',7,'MUSICAL',6,'WEAPON',7)),JSON_OBJECT('key','FOOD','name','珍馐盛宴','categoryWeights',JSON_OBJECT('FURNITURE',7,'DIGITAL',7,'ANTIQUE',7,'BOOK',7,'JEWELRY',7,'FOOD',40,'ELECTRONICS',6,'ART',7,'MUSICAL',6,'WEAPON',6)),JSON_OBJECT('key','ELECTRONICS','name','电子工坊','categoryWeights',JSON_OBJECT('FURNITURE',7,'DIGITAL',7,'ANTIQUE',7,'BOOK',7,'JEWELRY',7,'FOOD',6,'ELECTRONICS',40,'ART',7,'MUSICAL',6,'WEAPON',6)),JSON_OBJECT('key','ART','name','艺术画廊','categoryWeights',JSON_OBJECT('FURNITURE',7,'DIGITAL',7,'ANTIQUE',7,'BOOK',7,'JEWELRY',7,'FOOD',6,'ELECTRONICS',6,'ART',40,'MUSICAL',6,'WEAPON',7)),JSON_OBJECT('key','MUSICAL','name','乐器行','categoryWeights',JSON_OBJECT('FURNITURE',7,'DIGITAL',7,'ANTIQUE',7,'BOOK',7,'JEWELRY',7,'FOOD',6,'ELECTRONICS',6,'ART',7,'MUSICAL',40,'WEAPON',6)),JSON_OBJECT('key','WEAPON','name','兵器库','categoryWeights',JSON_OBJECT('FURNITURE',7,'DIGITAL',7,'ANTIQUE',7,'BOOK',7,'JEWELRY',7,'FOOD',6,'ELECTRONICS',6,'ART',7,'MUSICAL',6,'WEAPON',40)),JSON_OBJECT('key','UNKNOWN','name','未知盲盒','categoryWeights',JSON_OBJECT('FURNITURE',10,'DIGITAL',10,'ANTIQUE',10,'BOOK',10,'JEWELRY',10,'FOOD',10,'ELECTRONICS',10,'ART',10,'MUSICAL',10,'WEAPON',10)))) COMMENT '主题预设列表(JSON数组)，key/name/categoryWeights'
+                             weight_deviation    INT DEFAULT 10 COMMENT '品质权重偏移百分比(±)，仓库生成时各品质数量随机波动范围'
 );
 
 -- 插入默认配置
 INSERT INTO game_config (id) VALUES (1) ON DUPLICATE KEY UPDATE id=1;
+
+-- ── 仓库地区预设表（可热更新品质权重和数量范围）──────────────────
+CREATE TABLE region_preset (
+    id              INT PRIMARY KEY AUTO_INCREMENT,
+    region_key      VARCHAR(50) NOT NULL UNIQUE COMMENT '地区标识，如 DELIVERY_STATION',
+    name            VARCHAR(50) NOT NULL COMMENT '显示名称，如 快递站',
+    item_count_min  INT NOT NULL DEFAULT 5 COMMENT '最少物品数',
+    item_count_max  INT NOT NULL DEFAULT 10 COMMENT '最多物品数',
+    weight          INT NOT NULL DEFAULT 10 COMMENT '随机权重（RANDOM模式下选中的概率）',
+    quality_weights JSON NOT NULL COMMENT '品质权重: {"WHITE":N,"GREEN":N,...}',
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) COMMENT='仓库地区预设，RngManager 从此表读取品质权重和数量范围';
+
+INSERT INTO region_preset (region_key, name, item_count_min, item_count_max, weight, quality_weights) VALUES
+('DELIVERY_STATION', '快递站', 5, 10, 30, '{"WHITE":45,"GREEN":25,"BLUE":15,"PURPLE":8,"GOLD":5,"RED":2}'),
+('VILLA', '别墅', 10, 18, 40, '{"WHITE":35,"GREEN":28,"BLUE":18,"PURPLE":12,"GOLD":5,"RED":2}'),
+('MUSEUM', '博物馆', 15, 25, 20, '{"WHITE":8,"GREEN":12,"BLUE":18,"PURPLE":28,"GOLD":22,"RED":12}'),
+('SHIPWRECK', '沉船', 18, 30, 10, '{"WHITE":10,"GREEN":15,"BLUE":20,"PURPLE":25,"GOLD":20,"RED":10}');
+
+-- ── 仓库主题预设表（可热更新品类权重）───────────────────────────
+CREATE TABLE theme_preset (
+    id               INT PRIMARY KEY AUTO_INCREMENT,
+    theme_key        VARCHAR(50) NOT NULL UNIQUE COMMENT '主题标识，如 FURNITURE',
+    name             VARCHAR(50) NOT NULL COMMENT '显示名称，如 家具天堂',
+    category_weights JSON NOT NULL COMMENT '品类权重: {"FURNITURE":N,"DIGITAL":N,...}',
+    created_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at       DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) COMMENT='仓库主题预设，RngManager 从此表读取品类权重';
+
+INSERT INTO theme_preset (theme_key, name, category_weights) VALUES
+('FURNITURE',   '家具天堂', '{"FURNITURE":40,"DIGITAL":7,"ANTIQUE":7,"BOOK":7,"JEWELRY":7,"FOOD":6,"ELECTRONICS":6,"ART":7,"MUSICAL":6,"WEAPON":7}'),
+('DIGITAL',     '数码实验室', '{"FURNITURE":7,"DIGITAL":40,"ANTIQUE":7,"BOOK":7,"JEWELRY":7,"FOOD":6,"ELECTRONICS":6,"ART":7,"MUSICAL":6,"WEAPON":7}'),
+('ANTIQUE',     '古董地窖', '{"FURNITURE":7,"DIGITAL":7,"ANTIQUE":40,"BOOK":7,"JEWELRY":7,"FOOD":6,"ELECTRONICS":6,"ART":7,"MUSICAL":6,"WEAPON":7}'),
+('BOOK',        '古典书房', '{"FURNITURE":7,"DIGITAL":7,"ANTIQUE":7,"BOOK":40,"JEWELRY":7,"FOOD":6,"ELECTRONICS":6,"ART":7,"MUSICAL":6,"WEAPON":7}'),
+('JEWELRY',     '珠宝金库', '{"FURNITURE":7,"DIGITAL":7,"ANTIQUE":7,"BOOK":7,"JEWELRY":40,"FOOD":6,"ELECTRONICS":6,"ART":7,"MUSICAL":6,"WEAPON":7}'),
+('FOOD',        '珍馐盛宴', '{"FURNITURE":7,"DIGITAL":7,"ANTIQUE":7,"BOOK":7,"JEWELRY":7,"FOOD":40,"ELECTRONICS":6,"ART":7,"MUSICAL":6,"WEAPON":6}'),
+('ELECTRONICS', '电子工坊', '{"FURNITURE":7,"DIGITAL":7,"ANTIQUE":7,"BOOK":7,"JEWELRY":7,"FOOD":6,"ELECTRONICS":40,"ART":7,"MUSICAL":6,"WEAPON":6}'),
+('ART',         '艺术画廊', '{"FURNITURE":7,"DIGITAL":7,"ANTIQUE":7,"BOOK":7,"JEWELRY":7,"FOOD":6,"ELECTRONICS":6,"ART":40,"MUSICAL":6,"WEAPON":7}'),
+('MUSICAL',     '乐器行', '{"FURNITURE":7,"DIGITAL":7,"ANTIQUE":7,"BOOK":7,"JEWELRY":7,"FOOD":6,"ELECTRONICS":6,"ART":7,"MUSICAL":40,"WEAPON":6}'),
+('WEAPON',      '兵器库', '{"FURNITURE":7,"DIGITAL":7,"ANTIQUE":7,"BOOK":7,"JEWELRY":7,"FOOD":6,"ELECTRONICS":6,"ART":7,"MUSICAL":6,"WEAPON":40}'),
+('UNKNOWN',     '未知盲盒', '{"FURNITURE":10,"DIGITAL":10,"ANTIQUE":10,"BOOK":10,"JEWELRY":10,"FOOD":10,"ELECTRONICS":10,"ART":10,"MUSICAL":10,"WEAPON":10}');
 
 -- ── 物品字典表 ──────────────────────────────────────────────
 -- RngManager 根据品质权重从此表随机抽取物品，value为固定价值

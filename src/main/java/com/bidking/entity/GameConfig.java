@@ -39,10 +39,8 @@ public class GameConfig {
     private String warehouseTheme = "RANDOM";
     /** 仓库地区: Region key / "RANDOM" */
     private String warehouseRegion = "RANDOM";
-    /** Region 预设 JSON 数组，可热更新品质权重和数量范围 */
-    private String warehouseRegions;
-    /** Theme 预设 JSON 数组，可热更新品类权重 */
-    private String warehouseThemes;
+    /** 品质权重偏移百分比(±)，仓库生成时各品质数量随机波动范围 */
+    private Integer weightDeviation = 10;
 
     // ── 信息透明度配置 ──────────────────────────
     /** true=暗标（看不到他人出价），false=明标（可看到他人每轮出价） */

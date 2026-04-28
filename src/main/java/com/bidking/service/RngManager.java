@@ -5,6 +5,8 @@ import com.bidking.dto.WarehouseTheme;
 import com.bidking.entity.GameConfig;
 import com.bidking.entity.ItemTemplate;
 import com.bidking.mapper.ItemTemplateMapper;
+import com.bidking.mapper.RegionPresetMapper;
+import com.bidking.mapper.ThemePresetMapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -36,6 +38,8 @@ public class RngManager {
     public static final int GRID_COLS = 10;
 
     private final ItemTemplateMapper itemTemplateMapper;
+    private final RegionPresetMapper regionPresetMapper;
+    private final ThemePresetMapper themePresetMapper;
     private final ObjectMapper objectMapper;
 
     /**
@@ -83,28 +87,40 @@ public class RngManager {
                     .nextInt(config.getWarehouseSizeMin(), config.getWarehouseSizeMax() + 1);
         }
 
-        // 内存中随机抽取物品
-        List<Map<String, Object>> items = new ArrayList<>();
-        for (int i = 0; i < itemCount; i++) {
-            String quality = weightedRandom(qualityWeights);
-            ItemTemplate tpl;
+        // 按品质权重+随机偏移预分配各品质数量
+        int deviation = config.getWeightDeviation() != null ? config.getWeightDeviation() : 0;
+        Map<String, Integer> qualityCounts = resolveQualityCounts(qualityWeights, itemCount, deviation);
 
-            if (categoryWeights != null) {
-                String category = weightedRandom(categoryWeights);
-                tpl = pickRandom(grouped, quality, category);
-                if (tpl == null) {
-                    log.debug("[Rng] quality={} category={} 无匹配，回退到仅品质查询", quality, category);
+        // 按分配的数量逐品质生成物品
+        List<Map<String, Object>> items = new ArrayList<>();
+        for (var qc : qualityCounts.entrySet()) {
+            String quality = qc.getKey();
+            int count = qc.getValue();
+            for (int i = 0; i < count; i++) {
+                ItemTemplate tpl;
+                if (categoryWeights != null) {
+                    String category = weightedRandom(categoryWeights);
+                    tpl = pickRandom(grouped, quality, category);
+                    if (tpl == null) {
+                        log.debug("[Rng] quality={} category={} 无匹配，回退到仅品质查询", quality, category);
+                        tpl = pickRandom(byQuality, quality);
+                    }
+                } else {
                     tpl = pickRandom(byQuality, quality);
                 }
-            } else {
-                tpl = pickRandom(byQuality, quality);
+                if (tpl != null) {
+                    items.add(buildItem(tpl));
+                } else {
+                    log.warn("[Rng] quality={} 未找到匹配物品模板", quality);
+                }
             }
+        }
 
-            if (tpl == null) {
-                log.warn("[Rng] quality={} 未找到匹配物品模板", quality);
-                continue;
-            }
-            items.add(buildItem(tpl));
+        // 打乱顺序，避免同品质堆积
+        ThreadLocalRandom rng = ThreadLocalRandom.current();
+        for (int i = items.size() - 1; i > 0; i--) {
+            int j = rng.nextInt(i + 1);
+            Collections.swap(items, i, j);
         }
 
         finishItems(items, config);
@@ -147,24 +163,43 @@ public class RngManager {
         assignGridPositions(items);
     }
 
-    /** 解析 Region 预设 JSON */
-    @SneakyThrows
+    /** 从 region_preset 表加载所有地区预设 */
     private List<WarehouseRegion> parseRegions(GameConfig config) {
-        if (config.getWarehouseRegions() == null || config.getWarehouseRegions().isBlank()) {
-            return Collections.emptyList();
-        }
-        return objectMapper.readValue(config.getWarehouseRegions(),
-                new TypeReference<List<WarehouseRegion>>() {});
+        var list = regionPresetMapper.selectList(null);
+        if (list == null || list.isEmpty()) return Collections.emptyList();
+        return list.stream().map(p -> {
+            WarehouseRegion r = new WarehouseRegion();
+            r.setKey(p.getRegionKey());
+            r.setName(p.getName());
+            r.setItemCountMin(p.getItemCountMin());
+            r.setItemCountMax(p.getItemCountMax());
+            r.setWeight(p.getWeight() != null ? p.getWeight() : 10);
+            try {
+                r.setQualityWeights(objectMapper.readValue(p.getQualityWeights(), new TypeReference<>() {}));
+            } catch (Exception e) {
+                log.warn("[Rng] 解析地区品质权重失败 region={}", p.getRegionKey());
+                r.setQualityWeights(Map.of());
+            }
+            return r;
+        }).collect(Collectors.toList());
     }
 
-    /** 解析 Theme 预设 JSON */
-    @SneakyThrows
+    /** 从 theme_preset 表加载所有主题预设 */
     private List<WarehouseTheme> parseThemes(GameConfig config) {
-        if (config.getWarehouseThemes() == null || config.getWarehouseThemes().isBlank()) {
-            return Collections.emptyList();
-        }
-        return objectMapper.readValue(config.getWarehouseThemes(),
-                new TypeReference<List<WarehouseTheme>>() {});
+        var list = themePresetMapper.selectList(null);
+        if (list == null || list.isEmpty()) return Collections.emptyList();
+        return list.stream().map(p -> {
+            WarehouseTheme t = new WarehouseTheme();
+            t.setKey(p.getThemeKey());
+            t.setName(p.getName());
+            try {
+                t.setCategoryWeights(objectMapper.readValue(p.getCategoryWeights(), new TypeReference<>() {}));
+            } catch (Exception e) {
+                log.warn("[Rng] 解析主题品类权重失败 theme={}", p.getThemeKey());
+                t.setCategoryWeights(Map.of());
+            }
+            return t;
+        }).collect(Collectors.toList());
     }
 
     private WarehouseRegion resolveRegion(String regionKey, List<WarehouseRegion> regions) {
@@ -266,6 +301,74 @@ public class RngManager {
             if (rand < cumulative) return entry.getKey();
         }
         return weights.keySet().iterator().next();
+    }
+
+    /**
+     * 按品质权重 + 随机偏移计算各品质应生成的数量。
+     * 偏差使每局各品质数量在理论值附近波动，增加随机性。
+     */
+    static Map<String, Integer> resolveQualityCounts(Map<String, Integer> weights, int totalItems, int deviationPercent) {
+        int totalWeight = weights.values().stream().mapToInt(Integer::intValue).sum();
+        double deviation = deviationPercent / 100.0;
+
+        // 各品质理论数量 + 随机偏移
+        Map<String, Double> raw = new LinkedHashMap<>();
+        double rawSum = 0;
+        for (var entry : weights.entrySet()) {
+            double theoretical = (double) entry.getValue() / totalWeight * totalItems;
+            double offset = (ThreadLocalRandom.current().nextDouble() * 2 - 1) * deviation * totalItems;
+            double v = Math.max(0, theoretical + offset);
+            raw.put(entry.getKey(), v);
+            rawSum += v;
+        }
+
+        if (rawSum <= 0) {
+            // 极端情况：所有品质均被偏移到 0，回退到均匀分配
+            Map<String, Integer> fallback = new LinkedHashMap<>();
+            int each = totalItems / weights.size();
+            int extra = totalItems % weights.size();
+            int i = 0;
+            for (String q : weights.keySet()) {
+                fallback.put(q, each + (i < extra ? 1 : 0));
+                i++;
+            }
+            return fallback;
+        }
+
+        // 归一化到 totalItems
+        double scale = totalItems / rawSum;
+        double[] remainders = new double[weights.size()];
+        int[] counts = new int[weights.size()];
+        int idx = 0;
+        int assigned = 0;
+        for (String quality : weights.keySet()) {
+            double scaled = raw.get(quality) * scale;
+            counts[idx] = (int) scaled;
+            remainders[idx] = scaled - counts[idx];
+            assigned += counts[idx];
+            idx++;
+        }
+
+        // 将余数分配给小数部分最大的品质
+        int remaining = totalItems - assigned;
+        while (remaining > 0) {
+            int best = 0;
+            for (int i = 1; i < remainders.length; i++) {
+                if (remainders[i] > remainders[best]) best = i;
+            }
+            counts[best]++;
+            remainders[best] = -1;
+            remaining--;
+        }
+
+        // 组装结果
+        Map<String, Integer> result = new LinkedHashMap<>();
+        idx = 0;
+        for (String quality : weights.keySet()) {
+            result.put(quality, Math.max(0, Math.min(totalItems, counts[idx])));
+            idx++;
+        }
+        return result;
     }
 
     private Map<String, Object> buildItem(ItemTemplate tpl) {
